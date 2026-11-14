@@ -7,18 +7,25 @@
 <style>
   html, body { margin: 0; height: 100%; background: #24231f; }
   body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
+  .bar { display: flex; gap: 14px; align-items: center; font: 13px/1 sans-serif; }
+  .bar a { color: #b9b4a6; }
   canvas { height: 92vh; max-width: 96vw; aspect-ratio: 1400 / 2016; box-shadow: 0 8px 40px rgba(0,0,0,.6); }
   button { font: 13px/1 sans-serif; padding: 6px 14px; color: #ddd; background: #3a3833; border: 1px solid #5a574f; border-radius: 4px; cursor: pointer; }
 </style>
 </head>
 <body>
 <canvas id="c" width="1400" height="2016"></canvas>
-<button id="save">PNGで保存</button>
+<div class="bar">
+  <a href="?">版画</a>
+  <a href="?w=1170&h=2532">壁紙 iPhone 13 Pro</a>
+  <button id="save">PNGで保存</button>
+</div>
 
 <script id="fs" type="x-shader/x-fragment">
 precision highp float;
 uniform vec2 uRes;
 uniform vec4 uMargin;   // 左, 右, 上, 下（キャンバスに対する割合）
+uniform vec2 uView;     // 絵の座標で見た、画面下端の y と画面の高さ
 uniform vec2 uSealC;    // 落款の中心（絵の座標）
 uniform vec2 uSealH;    // 落款の半サイズ
 uniform sampler2D uText; // R: 題字, G: 落款の白抜き文字
@@ -54,7 +61,9 @@ vec3 sky(float y) {
   float t = clamp((y - HZ) / (1.0 - HZ), 0.0, 1.0);
   vec3 c = mix(vec3(0.98, 0.80, 0.62), vec3(0.24, 0.45, 0.66), smoothstep(0.02, 0.42, t));
   c = mix(c, vec3(0.07, 0.15, 0.36), smoothstep(0.35, 1.0, t));
-  return mix(vec3(0.95, 0.62, 0.50), c, smoothstep(0.0, 0.10, t));
+  c = mix(vec3(0.95, 0.62, 0.50), c, smoothstep(0.0, 0.10, t));
+  // 縦長の壁紙では空が y > 1 まで続く。同じ色のままだと間延びするので、さらに暗くぼかす
+  return mix(c, vec3(0.03, 0.07, 0.20), smoothstep(1.0, 1.45, y));
 }
 
 float hillH(float x) {
@@ -88,8 +97,10 @@ void main() {
   vec2 uv = gl_FragCoord.xy / uRes;
   vec2 span = vec2(1.0 - uMargin.x - uMargin.y, 1.0 - uMargin.z - uMargin.w);
   vec2 q = (uv - vec2(uMargin.x, uMargin.w)) / span;
-  float A = uRes.x * span.x / (uRes.y * span.y);
-  vec2 p = vec2(q.x * A, q.y);   // 絵の座標。高さが 1、幅が A
+  // 絵の座標。幅は画面比率によらず A で一定にし、縦長の画面では上下に景色を足す。
+  // 高さを 1 に固定して幅を詰める方式は、松や月が左右で切れるので採らなかった
+  float A = uView.y * uRes.x * span.x / (uRes.y * span.y);
+  vec2 p = vec2(q.x * A, uView.x + q.y * uView.y);
 
   // ---- 空 ----
   vec3 col = sky(p.y);
@@ -218,7 +229,7 @@ void main() {
 
   // ---- 余白と題字 ----
   float e = 0.0007 * (noise(p * 90.0) - 0.5);
-  float inside = step(e, p.x) * step(p.x, A - e) * step(e, p.y) * step(p.y, 1.0 - e);
+  float inside = step(e, p.x) * step(p.x, A - e) * step(uView.x + e, p.y) * step(p.y, uView.x + uView.y - e);
   vec3 margin = mix(PAPER, INK, tx.r * 0.9);
   col = mix(margin, col, inside);
 
@@ -232,14 +243,23 @@ void main() {
 
 <script>
 const canvas = document.getElementById('c');
-const W = canvas.width, H = canvas.height;
+// ?w=1170&h=2532 のように画素数を渡すと、余白と題字のない壁紙版になる
+const params = new URLSearchParams(location.search);
+const wallpaper = params.has('w') && params.has('h');
+const W = wallpaper ? +params.get('w') : 1400, H = wallpaper ? +params.get('h') : 2016;
+canvas.width = W;
+canvas.height = H;
+canvas.style.aspectRatio = `${W} / ${H}`;
 // toBlob で保存するため描画バッファを保持する。静止画を1回描くだけなので性能上の不利はない
 const gl = canvas.getContext('webgl', { preserveDrawingBuffer: true, antialias: false });
 
-const MARGIN = { l: 0.07, r: 0.07, t: 0.05, b: 0.09 };
+const MARGIN = wallpaper ? { l: 0, r: 0, t: 0, b: 0 } : { l: 0.07, r: 0.07, t: 0.05, b: 0.09 };
 const PIC = { x: MARGIN.l * W, y: MARGIN.t * H, w: (1 - MARGIN.l - MARGIN.r) * W, h: (1 - MARGIN.t - MARGIN.b) * H };
-const A = PIC.w / PIC.h;
-const SEAL = { c: [A - 0.07, 0.075], h: [0.021, 0.038] };
+const A = 1400 / 2016;
+// 壁紙では足した分の多くを空に回す。ロック画面の時計が空に載るようにするため
+const VIEW = { bottom: wallpaper ? -0.1 : 0, height: A * PIC.h / PIC.w };
+// 壁紙では落款を少し上げる。ロック画面右下のカメラボタンに隠れるため
+const SEAL = { c: [A - 0.07, wallpaper ? 0.12 : 0.075], h: [0.021, 0.038] };
 
 // 文字はシェーダーで形を作らず、2D canvas に書いてテクスチャで渡す。
 // 漢字の字形を距離関数で組むのは割に合わないため
@@ -253,15 +273,17 @@ function makeTextTexture() {
   ctx.textBaseline = 'middle';
   const mincho = '"Yu Mincho", "Hiragino Mincho ProN", "Noto Serif JP", serif';
   const px = x => PIC.x + (x / A) * PIC.w;
-  const py = y => PIC.y + (1 - y) * PIC.h;
+  const py = y => PIC.y + (1 - (y - VIEW.bottom) / VIEW.height) * PIC.h;
+  const unit = PIC.h / VIEW.height;
 
   ctx.fillStyle = '#0f0';
-  ctx.font = `bold ${0.032 * PIC.h}px ${mincho}`;
+  ctx.font = `bold ${0.032 * unit}px ${mincho}`;
   ctx.fillText('蔵', px(SEAL.c[0]), py(SEAL.c[1] + 0.018));
   ctx.fillText('人', px(SEAL.c[0]), py(SEAL.c[1] - 0.018));
 
+  if (wallpaper) return t;
   ctx.fillStyle = '#f00';
-  const size = 0.019 * PIC.h;
+  const size = 0.019 * unit;
   ctx.font = `${size}px ${mincho}`;
   const title = [...'月夜の湖畔'];
   const bottom = PIC.y + PIC.h - size * 0.7;
@@ -300,6 +322,7 @@ gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
 gl.uniform2f(gl.getUniformLocation(prog, 'uRes'), W, H);
 gl.uniform4f(gl.getUniformLocation(prog, 'uMargin'), MARGIN.l, MARGIN.r, MARGIN.t, MARGIN.b);
+gl.uniform2f(gl.getUniformLocation(prog, 'uView'), VIEW.bottom, VIEW.height);
 gl.uniform2f(gl.getUniformLocation(prog, 'uSealC'), SEAL.c[0], SEAL.c[1]);
 gl.uniform2f(gl.getUniformLocation(prog, 'uSealH'), SEAL.h[0], SEAL.h[1]);
 gl.uniform1i(gl.getUniformLocation(prog, 'uText'), 0);
@@ -309,7 +332,7 @@ gl.drawArrays(gl.TRIANGLES, 0, 3);
 document.getElementById('save').onclick = () => canvas.toBlob(blob => {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'clawd-shinhanga.png';
+  a.download = `clawd-shinhanga-${W}x${H}.png`;
   a.click();
   URL.revokeObjectURL(a.href);
 });
