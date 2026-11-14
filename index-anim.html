@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>月夜の湖畔 — Clawd 新版画</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #24231f; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
+  .bar { display: flex; gap: 14px; align-items: center; font: 13px/1 sans-serif; }
+  .bar a { color: #b9b4a6; }
+  canvas { height: 92vh; max-width: 96vw; aspect-ratio: 1400 / 2016; box-shadow: 0 8px 40px rgba(0,0,0,.6); }
+  button { font: 13px/1 sans-serif; padding: 6px 14px; color: #ddd; background: #3a3833; border: 1px solid #5a574f; border-radius: 4px; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1400" height="2016"></canvas>
+<div class="bar">
+  <a href="?">版画</a>
+  <a href="?w=1170&h=2532">壁紙 iPhone 13 Pro</a>
+  <button id="save">PNGで保存</button>
+</div>
+
+<script id="fs" type="x-shader/x-fragment">
+precision highp float;
+uniform vec2 uRes;
+uniform vec4 uMargin;   // 左, 右, 上, 下（キャンバスに対する割合）
+uniform vec2 uView;     // 絵の座標で見た、画面下端の y と画面の高さ
+uniform vec2 uSealC;    // 落款の中心（絵の座標）
+uniform vec2 uSealH;    // 落款の半サイズ
+uniform sampler2D uText; // R: 題字, G: 落款の白抜き文字
+uniform float uTime;    // 水面の揺らぎに使う経過秒数
+
+const float HZ = 0.42;  // 水平線の高さ
+const vec3 INK   = vec3(0.06, 0.09, 0.20);
+const vec3 PAPER = vec3(0.93, 0.89, 0.80);
+
+float hash1(float n) { return fract(sin(n * 127.1) * 43758.5453); }
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float noise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x),
+             mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y);
+}
+float fbm(vec2 p) {
+  float a = 0.5, s = 0.0;
+  for (int i = 0; i < 5; i++) { s += a * noise(p); p = p * 2.03 + 17.0; a *= 0.5; }
+  return s;
+}
+float sdBox(vec2 p, vec2 c, vec2 h) {
+  vec2 d = abs(p - c) - h;
+  return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+}
+float sdSeg(vec2 p, vec2 a, vec2 b) {
+  vec2 pa = p - a, ba = b - a;
+  return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0));
+}
+
+// 空のぼかし摺り：上は濃藍、水平線に近づくほど残照の橙
+vec3 sky(float y) {
+  float t = clamp((y - HZ) / (1.0 - HZ), 0.0, 1.0);
+  vec3 c = mix(vec3(0.98, 0.80, 0.62), vec3(0.24, 0.45, 0.66), smoothstep(0.02, 0.42, t));
+  c = mix(c, vec3(0.07, 0.15, 0.36), smoothstep(0.35, 1.0, t));
+  c = mix(vec3(0.95, 0.62, 0.50), c, smoothstep(0.0, 0.10, t));
+  // 縦長の壁紙では空が y > 1 まで続く。同じ色のままだと間延びするので、さらに暗くぼかす
+  return mix(c, vec3(0.03, 0.07, 0.20), smoothstep(1.0, 1.45, y));
+}
+
+float hillH(float x) {
+  return HZ + 0.018 + 0.022 * fbm(vec2(x * 5.0, 1.0)) + 0.006 * noise(vec2(x * 70.0, 2.0))
+       + 0.03 * smoothstep(0.3, 0.7, x);
+}
+
+float shoreH(float x) {
+  return 0.20 - 0.24 * smoothstep(0.30, 0.68, x) + 0.006 * noise(vec2(x * 30.0, 5.0));
+}
+
+// 松葉の塊。上は丸く下は平らにつぶす
+float pineBlob(vec2 p, vec2 c, vec2 r) {
+  vec2 d = p - c;
+  if (d.y < 0.0) r.y *= 0.45;
+  return length(d / r) - 1.0 + 0.4 * (noise(p * vec2(260.0, 40.0)) - 0.5);
+}
+
+// Clawd の形。1マス単位のドット絵を矩形の和で表す
+float clawdBody(vec2 c) {
+  float d = sdBox(c, vec2(7.0, 6.0), vec2(5.0, 4.0));          // 胴
+  d = min(d, sdBox(c, vec2(7.0, 5.0), vec2(7.0, 1.0)));         // 腕
+  d = min(d, sdBox(c, vec2(2.5, 1.0), vec2(0.5, 1.0)));         // 脚
+  d = min(d, sdBox(c, vec2(4.5, 1.0), vec2(0.5, 1.0)));
+  d = min(d, sdBox(c, vec2(9.5, 1.0), vec2(0.5, 1.0)));
+  d = min(d, sdBox(c, vec2(11.5, 1.0), vec2(0.5, 1.0)));
+  return d;
+}
+
+void main() {
+  vec2 uv = gl_FragCoord.xy / uRes;
+  vec2 span = vec2(1.0 - uMargin.x - uMargin.y, 1.0 - uMargin.z - uMargin.w);
+  vec2 q = (uv - vec2(uMargin.x, uMargin.w)) / span;
+  // 絵の座標。幅は画面比率によらず A で一定にし、縦長の画面では上下に景色を足す。
+  // 高さを 1 に固定して幅を詰める方式は、松や月が左右で切れるので採らなかった
+  float A = uView.y * uRes.x * span.x / (uRes.y * span.y);
+  vec2 p = vec2(q.x * A, uView.x + q.y * uView.y);
+
+  // ---- 空 ----
+  vec3 col = sky(p.y);
+
+  // ---- 月 ----
+  vec2 mc = vec2(0.40, 0.74);
+  float md = length(p - mc);
+  vec3 moonCol = vec3(0.98, 0.94, 0.78);
+  col = mix(col, moonCol, 0.20 * smoothstep(0.17, 0.05, md));
+  col = mix(col, moonCol, step(md, 0.05));
+
+  // ---- たなびく雲 ----
+  float cb = fbm(vec2(p.x * 2.5 + 3.0, p.y * 16.0));
+  float cm = smoothstep(0.52, 0.54, cb) * smoothstep(0.50, 0.56, p.y) * smoothstep(0.82, 0.70, p.y);
+  vec3 cc = mix(vec3(0.62, 0.50, 0.56), vec3(0.20, 0.33, 0.55), smoothstep(0.52, 0.75, p.y));
+  col = mix(col, cc, cm * 0.75);
+
+  // ---- 富士 ----
+  float fd = abs(p.x - 0.20);
+  float fProf = HZ + 0.18 * pow(max(0.0, 1.0 - max(fd - 0.012, 0.0) / 0.36), 2.2)
+              + 0.003 * noise(vec2(p.x * 90.0, 7.0));
+  if (p.y < fProf) {
+    vec3 f = vec3(0.20, 0.33, 0.55);
+    float snowLine = 0.548 - 0.035 * pow(noise(vec2(p.x * 110.0, 9.0)), 2.0);
+    f = mix(f, vec3(0.94, 0.93, 0.89), step(snowLine, p.y));
+    // 裾は霞に溶かす
+    col = mix(col, f, smoothstep(HZ + 0.01, 0.52, p.y));
+  }
+  col = mix(col, INK, 0.7 * smoothstep(0.0022, 0.0008, abs(p.y - fProf)) * smoothstep(0.47, 0.53, p.y));
+
+  // ---- 霞 ----
+  float mist = exp(-pow((p.y - (HZ + 0.05)) / 0.022, 2.0));
+  col = mix(col, vec3(0.98, 0.87, 0.76), 0.55 * mist);
+
+  // ---- 対岸の森 ----
+  vec3 hillCol = vec3(0.08, 0.14, 0.28);
+  float hh = hillH(p.x);
+  if (p.y < hh) col = hillCol;
+  // 人家の灯
+  vec2 lampC = vec2(0.52, HZ + 0.008);
+  if (sdBox(p, lampC, vec2(0.0035, 0.003)) < 0.0) col = vec3(0.98, 0.72, 0.35);
+
+  // ---- 水面 ----
+  if (p.y < HZ) {
+    float dy = HZ - p.y;
+    // うねり。版画の静止した波筋に、ごく低い周波数の上下動だけを足す。
+    // dy そのものを大きく揺らすと水平線の位置がずれて見えるため、筋の位置合わせ用に留める
+    float swell = 0.0018 * sin(p.x * 21.0 - uTime * 1.1) + 0.0009 * sin(p.x * 53.0 + uTime * 2.3);
+    float wdy = max(dy + swell, 0.0001);
+    vec3 w = sky(HZ + wdy * 1.3) * vec3(0.80, 0.88, 0.98);
+    w = mix(w, vec3(0.08, 0.17, 0.36), smoothstep(0.0, 0.42, wdy) * 0.78);
+    // 森の映り込み。輪郭を時間でゆっくり波打たせる
+    float wob = 0.004 * (noise(vec2(p.x * 12.0 + uTime * 0.05, dy * 300.0 + uTime * 1.6)) - 0.5);
+    w = mix(w, hillCol * 1.2, step(wdy, (hh - HZ) * 0.9 + wob));
+    // さざ波の筋。遠くほど細かく、縞模様を少しずつ流して動かす
+    float ry = pow(wdy, 0.55);
+    float rip = noise(vec2(p.x * 8.0 + uTime * 0.08, ry * 90.0 - uTime * 1.4));
+    w = mix(w, w * 0.76, smoothstep(0.55, 0.60, rip));
+    w = mix(w, w + 0.10, smoothstep(0.78, 0.82, rip));
+    // 月の映り込み。帯の欠け方を時間で変え、きらめきにする
+    float mw = 0.012 + 0.06 * wdy;
+    float mx = abs(p.x - mc.x + 0.012 * (noise(vec2(3.0, dy * 70.0 + uTime * 1.8)) - 0.5));
+    float band = step(0.47, noise(vec2(p.x * 10.0 + uTime * 0.25, pow(wdy, 0.6) * 150.0 + uTime * 2.6)));
+    w = mix(w, moonCol, smoothstep(mw, mw * 0.4, mx) * band * 0.9 * step(0.03, wdy));
+    // 灯の映り込み
+    float lx = abs(p.x - lampC.x);
+    w = mix(w, vec3(0.98, 0.72, 0.35),
+            step(lx, 0.004) * step(0.012, wdy) * step(wdy, 0.06) * step(0.5, noise(vec2(1.0, dy * 400.0 + uTime * 3.0))));
+    col = w;
+  }
+
+  // ---- 手前の岸と草 ----
+  float g = shoreH(p.x);
+  float cell = floor(p.x * 170.0);
+  float blade = pow(hash1(cell), 2.0) * 0.045 * (1.0 - abs(fract(p.x * 170.0) - 0.5) * 2.0);
+  if (p.y < g + blade) {
+    vec3 s = vec3(0.07, 0.11, 0.23);
+    s = mix(s, vec3(0.12, 0.20, 0.34), smoothstep(0.5, 0.52, fbm(vec2(p.x * 6.0, p.y * 40.0))) * 0.6);
+    s = mix(s, vec3(0.30, 0.42, 0.55), step(p.y, g) * step(g - 0.004, p.y) * 0.7);  // 月明かりの縁
+    col = s;
+  }
+
+  // ---- Clawd ----
+  float cs = 0.011;
+  vec2 co = vec2(0.135, 0.197);
+  vec2 c = (p - co) / cs;
+  // 足元の影
+  if (length((c - vec2(7.0, 0.1)) / vec2(8.5, 0.9)) < 1.0 && p.y < g) col = INK;
+  float cd = clawdBody(c);
+  if (cd < 0.0) {
+    vec3 body = vec3(0.86, 0.47, 0.33);
+    body = mix(body, vec3(0.76, 0.38, 0.27), step(c.y, 2.0));      // 下側は陰の版
+    body = mix(body, vec3(0.95, 0.63, 0.45), step(9.0, c.y));      // 上面は月明かり
+    float eye = min(sdBox(c, vec2(4.5, 7.0), vec2(0.5, 1.0)), sdBox(c, vec2(9.5, 7.0), vec2(0.5, 1.0)));
+    col = mix(body, INK, step(eye, 0.0));
+  }
+  col = mix(col, INK, smoothstep(0.20, 0.10, abs(cd)));
+
+  // ---- 松の枝 ----
+  float br = sdSeg(p, vec2(0.75, 0.95), vec2(0.52, 0.905)) - 0.008;
+  br = min(br, sdSeg(p, vec2(0.52, 0.905), vec2(0.34, 0.845)) - 0.0045);
+  br = min(br, sdSeg(p, vec2(0.60, 0.92), vec2(0.53, 0.82)) - 0.004);
+  br = min(br, sdSeg(p, vec2(0.66, 0.935), vec2(0.62, 0.86)) - 0.004);
+  br += 0.002 * (noise(p * 150.0) - 0.5);
+  float pn = pineBlob(p, vec2(0.36, 0.855), vec2(0.075, 0.028));
+  pn = min(pn, pineBlob(p, vec2(0.50, 0.925), vec2(0.080, 0.030)));
+  pn = min(pn, pineBlob(p, vec2(0.53, 0.825), vec2(0.060, 0.024)));
+  pn = min(pn, pineBlob(p, vec2(0.63, 0.865), vec2(0.060, 0.026)));
+  pn = min(pn, pineBlob(p, vec2(0.64, 0.965), vec2(0.080, 0.030)));
+  pn = min(pn, pineBlob(p, vec2(0.43, 0.975), vec2(0.070, 0.025)));
+  if (br < 0.0) col = INK;
+  if (pn < 0.0) {
+    float green = smoothstep(0.45, 0.50, noise(p * vec2(60.0, 140.0))) * smoothstep(-0.15, -0.45, pn);
+    col = mix(INK, vec3(0.10, 0.26, 0.25), green);
+  }
+
+  // ---- 落款 ----
+  vec4 tx = texture2D(uText, uv);
+  float sd = sdBox(p, uSealC, uSealH) + 0.002 * (noise(p * 220.0) - 0.5);
+  if (sd < 0.0) {
+    float worn = smoothstep(0.80, 0.95, noise(p * 500.0));
+    col = mix(vec3(0.78, 0.17, 0.12), PAPER, max(tx.g, worn * 0.6));
+  }
+
+  // ---- 摺りの質感 ----
+  col *= 0.95 + 0.08 * fbm(p * 7.0);                                     // バレンのむら
+  col *= 1.0 - 0.016 * sin(p.y * 220.0 + 6.0 * fbm(p * vec2(1.5, 6.0))); // 版木の木目
+  float kasure = noise(gl_FragCoord.xy * 0.8 * (1400.0 / uRes.x));
+  col = mix(col, PAPER, 0.10 * smoothstep(0.7, 1.0, kasure));            // かすれ
+
+  // ---- 余白と題字 ----
+  float e = 0.0007 * (noise(p * 90.0) - 0.5);
+  float inside = step(e, p.x) * step(p.x, A - e) * step(uView.x + e, p.y) * step(p.y, uView.x + uView.y - e);
+  vec3 margin = mix(PAPER, INK, tx.r * 0.9);
+  col = mix(margin, col, inside);
+
+  // ---- 和紙 ----
+  col *= 0.955 + 0.07 * fbm(vec2(p.x * 300.0, p.y * 40.0));
+  col *= 0.98 + 0.03 * noise(p * 12.0);
+
+  gl_FragColor = vec4(col, 1.0);
+}
+</script>
+
+<script>
+const canvas = document.getElementById('c');
+// ?w=1170&h=2532 のように画素数を渡すと、余白と題字のない壁紙版になる
+const params = new URLSearchParams(location.search);
+const wallpaper = params.has('w') && params.has('h');
+const W = wallpaper ? +params.get('w') : 1400, H = wallpaper ? +params.get('h') : 2016;
+canvas.width = W;
+canvas.height = H;
+canvas.style.aspectRatio = `${W} / ${H}`;
+// toBlob で保存するため描画バッファを保持する。静止画を1回描くだけなので性能上の不利はない
+const gl = canvas.getContext('webgl', { preserveDrawingBuffer: true, antialias: false });
+
+const MARGIN = wallpaper ? { l: 0, r: 0, t: 0, b: 0 } : { l: 0.07, r: 0.07, t: 0.05, b: 0.09 };
+const PIC = { x: MARGIN.l * W, y: MARGIN.t * H, w: (1 - MARGIN.l - MARGIN.r) * W, h: (1 - MARGIN.t - MARGIN.b) * H };
+const A = 1400 / 2016;
+// 壁紙では足した分の多くを空に回す。ロック画面の時計が空に載るようにするため
+const VIEW = { bottom: wallpaper ? -0.1 : 0, height: A * PIC.h / PIC.w };
+// 壁紙では落款を少し上げる。ロック画面右下のカメラボタンに隠れるため
+const SEAL = { c: [A - 0.07, wallpaper ? 0.12 : 0.075], h: [0.021, 0.038] };
+
+// 文字はシェーダーで形を作らず、2D canvas に書いてテクスチャで渡す。
+// 漢字の字形を距離関数で組むのは割に合わないため
+function makeTextTexture() {
+  const t = document.createElement('canvas');
+  t.width = W; t.height = H;
+  const ctx = t.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const mincho = '"Yu Mincho", "Hiragino Mincho ProN", "Noto Serif JP", serif';
+  const px = x => PIC.x + (x / A) * PIC.w;
+  const py = y => PIC.y + (1 - (y - VIEW.bottom) / VIEW.height) * PIC.h;
+  const unit = PIC.h / VIEW.height;
+
+  ctx.fillStyle = '#0f0';
+  ctx.font = `bold ${0.032 * unit}px ${mincho}`;
+  ctx.fillText('蔵', px(SEAL.c[0]), py(SEAL.c[1] + 0.018));
+  ctx.fillText('人', px(SEAL.c[0]), py(SEAL.c[1] - 0.018));
+
+  if (wallpaper) return t;
+  ctx.fillStyle = '#f00';
+  const size = 0.019 * unit;
+  ctx.font = `${size}px ${mincho}`;
+  const title = [...'月夜の湖畔'];
+  const bottom = PIC.y + PIC.h - size * 0.7;
+  title.forEach((ch, i) => ctx.fillText(ch, MARGIN.l * W * 0.5, bottom - (title.length - 1 - i) * size * 1.25));
+  return t;
+}
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, 'attribute vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }'));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, document.getElementById('fs').textContent));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+const loc = gl.getAttribLocation(prog, 'a');
+gl.enableVertexAttribArray(loc);
+gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
+gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, makeTextTexture());
+// 2の累乗でないテクスチャなので、WebGL1 ではミップマップなし・端クランプにする必要がある
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+gl.uniform2f(gl.getUniformLocation(prog, 'uRes'), W, H);
+gl.uniform4f(gl.getUniformLocation(prog, 'uMargin'), MARGIN.l, MARGIN.r, MARGIN.t, MARGIN.b);
+gl.uniform2f(gl.getUniformLocation(prog, 'uView'), VIEW.bottom, VIEW.height);
+gl.uniform2f(gl.getUniformLocation(prog, 'uSealC'), SEAL.c[0], SEAL.c[1]);
+gl.uniform2f(gl.getUniformLocation(prog, 'uSealH'), SEAL.h[0], SEAL.h[1]);
+gl.uniform1i(gl.getUniformLocation(prog, 'uText'), 0);
+gl.viewport(0, 0, W, H);
+
+// 水面だけ時間で動くので、1回描いて終わりにはできず毎フレーム描き直す。
+// 保存ボタンはその瞬間の見た目を toBlob で書き出すだけなので、静止画の壁紙用途はそのまま使える
+const uTime = gl.getUniformLocation(prog, 'uTime');
+const t0 = performance.now();
+(function frame(now) {
+  gl.uniform1f(uTime, (now - t0) / 1000);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  requestAnimationFrame(frame);
+})(t0);
+
+document.getElementById('save').onclick = () => canvas.toBlob(blob => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `clawd-shinhanga-${W}x${H}.png`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+</script>
+</body>
+</html>
