@@ -9,7 +9,8 @@
   body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
   .bar { display: flex; gap: 14px; align-items: center; font: 13px/1 sans-serif; }
   .bar a { color: #b9b4a6; }
-  canvas { height: 92vh; max-width: 96vw; aspect-ratio: 1400 / 2016; box-shadow: 0 8px 40px rgba(0,0,0,.6); }
+  /* height を固定すると、横長の絵が max-width に当たったときに縦横比が崩れる。上限だけを決めて比率を保つ */
+  canvas { max-height: 92vh; max-width: 96vw; aspect-ratio: 1400 / 2016; box-shadow: 0 8px 40px rgba(0,0,0,.6); }
   button { font: 13px/1 sans-serif; padding: 6px 14px; color: #ddd; background: #3a3833; border: 1px solid #5a574f; border-radius: 4px; cursor: pointer; }
 </style>
 </head>
@@ -18,6 +19,7 @@
 <div class="bar">
   <a href="?">版画</a>
   <a href="?w=1170&h=2532">壁紙 iPhone 13 Pro</a>
+  <a href="?w=1920&h=1080">壁紙 フルHD</a>
   <button id="save">PNGで保存</button>
 </div>
 
@@ -25,7 +27,7 @@
 precision highp float;
 uniform vec2 uRes;
 uniform vec4 uMargin;   // 左, 右, 上, 下（キャンバスに対する割合）
-uniform vec2 uView;     // 絵の座標で見た、画面下端の y と画面の高さ
+uniform vec4 uView;     // 絵の座標で見た、画面左下の (x, y) と画面の (幅, 高さ)
 uniform vec2 uSealC;    // 落款の中心（絵の座標）
 uniform vec2 uSealH;    // 落款の半サイズ
 uniform sampler2D uText; // R: 題字, G: 落款の白抜き文字
@@ -69,11 +71,14 @@ vec3 sky(float y) {
 
 float hillH(float x) {
   return HZ + 0.018 + 0.022 * fbm(vec2(x * 5.0, 1.0)) + 0.006 * noise(vec2(x * 70.0, 2.0))
-       + 0.03 * smoothstep(0.3, 0.7, x);
+       + 0.03 * smoothstep(0.3, 0.7, x)
+       + 0.045 * smoothstep(-0.25, -0.75, x);   // 横長の画面で左に足す山並み
 }
 
 float shoreH(float x) {
-  return 0.20 - 0.24 * smoothstep(0.30, 0.68, x) + 0.006 * noise(vec2(x * 30.0, 5.0));
+  // 横長の画面では岸が左へ長く続く。平らなままだと単調なので、左へ向かって小高くする
+  return 0.20 - 0.24 * smoothstep(0.30, 0.68, x) + 0.006 * noise(vec2(x * 30.0, 5.0))
+       + 0.06 * smoothstep(-0.15, -0.8, x);
 }
 
 // 松葉の塊。上は丸く下は平らにつぶす
@@ -98,10 +103,10 @@ void main() {
   vec2 uv = gl_FragCoord.xy / uRes;
   vec2 span = vec2(1.0 - uMargin.x - uMargin.y, 1.0 - uMargin.z - uMargin.w);
   vec2 q = (uv - vec2(uMargin.x, uMargin.w)) / span;
-  // 絵の座標。幅は画面比率によらず A で一定にし、縦長の画面では上下に景色を足す。
-  // 高さを 1 に固定して幅を詰める方式は、松や月が左右で切れるので採らなかった
-  float A = uView.y * uRes.x * span.x / (uRes.y * span.y);
-  vec2 p = vec2(q.x * A, uView.x + q.y * uView.y);
+  // 絵の座標。版画の構図は x が 0〜0.694、y が 0〜1 に収まる。
+  // 画面比率が違うときは構図を拡大縮小せず、見える範囲を上下か左右に広げて景色を足す。
+  // 構図を画面に合わせて切り抜く方式は、松や月が端で切れるので採らなかった
+  vec2 p = uView.xy + q * uView.zw;
 
   // ---- 空 ----
   vec3 col = sky(p.y);
@@ -205,6 +210,9 @@ void main() {
   br = min(br, sdSeg(p, vec2(0.52, 0.905), vec2(0.34, 0.845)) - 0.0045);
   br = min(br, sdSeg(p, vec2(0.60, 0.92), vec2(0.53, 0.82)) - 0.004);
   br = min(br, sdSeg(p, vec2(0.66, 0.935), vec2(0.62, 0.86)) - 0.004);
+  // 横長の画面では枝の付け根が画面内に入るので、右上の画面外まで枝と葉を延ばしておく
+  br = min(br, sdSeg(p, vec2(1.12, 1.03), vec2(0.75, 0.95)) - 0.011);
+  br = min(br, sdSeg(p, vec2(0.90, 0.985), vec2(0.86, 0.90)) - 0.004);
   br += 0.002 * (noise(p * 150.0) - 0.5);
   float pn = pineBlob(p, vec2(0.36, 0.855), vec2(0.075, 0.028));
   pn = min(pn, pineBlob(p, vec2(0.50, 0.925), vec2(0.080, 0.030)));
@@ -212,6 +220,9 @@ void main() {
   pn = min(pn, pineBlob(p, vec2(0.63, 0.865), vec2(0.060, 0.026)));
   pn = min(pn, pineBlob(p, vec2(0.64, 0.965), vec2(0.080, 0.030)));
   pn = min(pn, pineBlob(p, vec2(0.43, 0.975), vec2(0.070, 0.025)));
+  pn = min(pn, pineBlob(p, vec2(0.80, 0.925), vec2(0.065, 0.026)));
+  pn = min(pn, pineBlob(p, vec2(0.87, 0.890), vec2(0.060, 0.024)));
+  pn = min(pn, pineBlob(p, vec2(0.96, 0.955), vec2(0.080, 0.030)));
   if (br < 0.0) col = INK;
   if (pn < 0.0) {
     float green = smoothstep(0.45, 0.50, noise(p * vec2(60.0, 140.0))) * smoothstep(-0.15, -0.45, pn);
@@ -234,7 +245,8 @@ void main() {
 
   // ---- 余白と題字 ----
   float e = 0.0007 * (noise(p * 90.0) - 0.5);
-  float inside = step(e, p.x) * step(p.x, A - e) * step(uView.x + e, p.y) * step(p.y, uView.x + uView.y - e);
+  vec2 lo = uView.xy + e, hi = uView.xy + uView.zw - e;
+  float inside = step(lo.x, p.x) * step(p.x, hi.x) * step(lo.y, p.y) * step(p.y, hi.y);
   vec3 margin = mix(PAPER, INK, tx.r * 0.9);
   col = mix(margin, col, inside);
 
@@ -261,10 +273,15 @@ const gl = canvas.getContext('webgl', { preserveDrawingBuffer: true, antialias: 
 const MARGIN = wallpaper ? { l: 0, r: 0, t: 0, b: 0 } : { l: 0.07, r: 0.07, t: 0.05, b: 0.09 };
 const PIC = { x: MARGIN.l * W, y: MARGIN.t * H, w: (1 - MARGIN.l - MARGIN.r) * W, h: (1 - MARGIN.t - MARGIN.b) * H };
 const A = 1400 / 2016;
-// 壁紙では足した分の多くを空に回す。ロック画面の時計が空に載るようにするため
-const VIEW = { bottom: wallpaper ? -0.1 : 0, height: A * PIC.h / PIC.w };
-// 壁紙では落款を少し上げる。ロック画面右下のカメラボタンに隠れるため
-const SEAL = { c: [A - 0.07, wallpaper ? 0.12 : 0.075], h: [0.021, 0.038] };
+const landscape = wallpaper && W > H;
+// 横長の壁紙は高さを構図に合わせ、左右に景色を足す。右端は松の枝の付け根が隠れる位置に置き、
+// 残りを左に足す。Clawd と月が画面の中央付近に来る。
+// 縦長の壁紙は幅を構図に合わせ、足した分の多くを空に回す。ロック画面の時計が空に載るようにするため
+const VIEW = landscape
+  ? { x: 1.03 - PIC.w / PIC.h, y: 0, w: PIC.w / PIC.h, h: 1 }
+  : { x: 0, y: wallpaper ? -0.1 : 0, w: A, h: A * PIC.h / PIC.w };
+// 壁紙では落款を少し上げる。ロック画面右下のカメラボタンや、デスクトップのタスクバーに隠れるため
+const SEAL = { c: [VIEW.x + VIEW.w - 0.07, landscape ? 0.10 : wallpaper ? 0.12 : 0.075], h: [0.021, 0.038] };
 
 // 文字はシェーダーで形を作らず、2D canvas に書いてテクスチャで渡す。
 // 漢字の字形を距離関数で組むのは割に合わないため
@@ -277,9 +294,9 @@ function makeTextTexture() {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   const mincho = '"Yu Mincho", "Hiragino Mincho ProN", "Noto Serif JP", serif';
-  const px = x => PIC.x + (x / A) * PIC.w;
-  const py = y => PIC.y + (1 - (y - VIEW.bottom) / VIEW.height) * PIC.h;
-  const unit = PIC.h / VIEW.height;
+  const px = x => PIC.x + ((x - VIEW.x) / VIEW.w) * PIC.w;
+  const py = y => PIC.y + (1 - (y - VIEW.y) / VIEW.h) * PIC.h;
+  const unit = PIC.h / VIEW.h;
 
   ctx.fillStyle = '#0f0';
   ctx.font = `bold ${0.032 * unit}px ${mincho}`;
@@ -327,7 +344,7 @@ gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
 gl.uniform2f(gl.getUniformLocation(prog, 'uRes'), W, H);
 gl.uniform4f(gl.getUniformLocation(prog, 'uMargin'), MARGIN.l, MARGIN.r, MARGIN.t, MARGIN.b);
-gl.uniform2f(gl.getUniformLocation(prog, 'uView'), VIEW.bottom, VIEW.height);
+gl.uniform4f(gl.getUniformLocation(prog, 'uView'), VIEW.x, VIEW.y, VIEW.w, VIEW.h);
 gl.uniform2f(gl.getUniformLocation(prog, 'uSealC'), SEAL.c[0], SEAL.c[1]);
 gl.uniform2f(gl.getUniformLocation(prog, 'uSealH'), SEAL.h[0], SEAL.h[1]);
 gl.uniform1i(gl.getUniformLocation(prog, 'uText'), 0);
